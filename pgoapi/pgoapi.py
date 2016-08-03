@@ -90,6 +90,7 @@ class PGoApi:
         self._farm_mode_triggered = False
         self._orig_step_size = config.get("BEHAVIOR", {}).get("STEP_SIZE", 200)
         self.wander_steps = config.get("BEHAVIOR", {}).get("WANDER_STEPS", 0)
+        self.seq_errors = 0
 
         self.pokemon_caught = 0
         self.player = Player({})
@@ -338,7 +339,7 @@ class PGoApi:
             pokemon_rarity_and_dist.sort(key=lambda x: x[1], reverse=True)
 
             if pokemon_rarity_and_dist:
-                self.log.info("Rarest pokemon: : %s", POKEMON_NAMES[str(pokemon_rarity_and_dist[0][0]['pokemon_id'])])
+                self.log.info("Rarest pokemon: : %s, encounter_id=%s, spawn_point_id=%s", POKEMON_NAMES[str(pokemon_rarity_and_dist[0][0]['pokemon_id'])], pokemon_rarity_and_dist[0][0]['encounter_id'], pokemon_rarity_and_dist[0][0]['spawn_point_id'])
                 return self.encounter_pokemon(pokemon_rarity_and_dist[0][0], new_loc=(curr_lat, curr_lng))
             else:
                 self.log.info("No nearby pokemon. Can't snipe!")
@@ -567,6 +568,7 @@ class PGoApi:
             self.log.info("Fort Spinned, %s (http://maps.google.com/maps?q=%s,%s)",
                           reward, fort['latitude'], fort['longitude'])
             self.visited_forts[fort['id']] = fort
+            self.seq_errors = 0
         elif result == 4:
             self.log.debug("For spinned but Your inventory is full : %s", res)
             self.log.info("For spinned but Your inventory is full.")
@@ -595,6 +597,7 @@ class PGoApi:
         if not destinations:
             self.log.debug("No fort to walk to! %s", res)
             self.log.info('No more spinnable forts within proximity. Or server error')
+            self.seq_errors += 1
             self.walk_back_to_origin()
             return False
         if len(destinations) >= 20:
@@ -667,7 +670,7 @@ class PGoApi:
         if time() - self._last_got_map_objects > self._map_objects_rate_limit:
             position = self.get_position()
             neighbors = get_neighbors(self._posf)
-            gevent.sleep(1.0)
+            gevent.sleep(0.2)
             self.map_objects = self.get_map_objects(latitude=position[0], longitude=position[1],
                                 since_timestamp_ms=[0] * len(neighbors),
                                 cell_id=neighbors).call()
@@ -738,16 +741,19 @@ class PGoApi:
                     item_count += item['count'] - recycle_count
                     self.log.info("Recycling {0} {1}(s)".format(recycle_count, get_item_name(item['item_id'])))
                     self.gsleep(0.2)
-                    res = self.recycle_inventory_item(item_id=item['item_id'], count=recycle_count).call()['responses'][
-                        'RECYCLE_INVENTORY_ITEM']
-                    response_code = res['result']
+                    res = self.recycle_inventory_item(item_id=item['item_id'], count=recycle_count).call()['responses'].get(
+                        'RECYCLE_INVENTORY_ITEM', 0)
+                    if not res:
+                        response_code = -1
+                    else:
+                        response_code = res['result']
                     if response_code == 1:
                         self.log.info("{0}(s) recycled successfully. New count: {1}".format(get_item_name(
                                       item['item_id']), res.get('new_count', 0)))
                     else:
                         self.log.info("Failed to recycle {0}, Code: {1}".format(get_item_name(item['item_id']),
                                                                                 response_code))
-                    self.gsleep(1)
+                    self.gsleep(0.2)
                 elif "count" in item:
                     item_count += item['count']
         if item_count > 0:
@@ -789,7 +795,7 @@ class PGoApi:
         else:
             # self.log.debug("Failed to release pokemon %s, %s", pokemon, release_res)  # FIXME release_res is not in scope!
             self.log.info("Failed to release Pokemon %s", pokemon)
-        self.gsleep(1.0)
+        self.gsleep(0.2)
 
     def get_pokemon_stats(self, inventory_items=None):
         if not inventory_items:
@@ -1147,6 +1153,9 @@ class PGoApi:
 
             if self.experimental and self.spin_all_forts:
                 self.spin_all_forts_visible()
+                if self.seq_errors > 10:
+                    self.seq_errors = 0
+                    raise Exception('Stuck... Restarting.')
             else:
                 self.spin_near_fort()
             # if catching fails 10 times, maybe you are sofbanned.
